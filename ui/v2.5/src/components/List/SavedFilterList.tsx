@@ -26,13 +26,18 @@ import { View } from "./views";
 import { FormattedMessage, useIntl } from "react-intl";
 import { Icon } from "../Shared/Icon";
 import { LoadingIndicator } from "../Shared/LoadingIndicator";
-import { faBookmark, faSave, faTimes } from "@fortawesome/free-solid-svg-icons";
+import {
+  faBookmark,
+  faEllipsisV,
+  faSave,
+} from "@fortawesome/free-solid-svg-icons";
 import { AlertModal } from "../Shared/Alert";
 import cx from "classnames";
 import { TruncatedInlineText } from "../Shared/TruncatedText";
 import { OperationButton } from "../Shared/OperationButton";
 import { createPortal } from "react-dom";
 import { PatchFunction } from "src/patch";
+import { OperationDropdownItem } from "./ListOperationButtons";
 
 const ExistingSavedFilterList: React.FC<{
   name: string;
@@ -181,6 +186,55 @@ export const LoadFilterDialog: React.FC<{
   );
 };
 
+const RenameFilterDialog: React.FC<{
+  renamingFilter: SavedFilterDataFragment;
+  onClose: (name?: string) => void;
+}> = ({ renamingFilter, onClose }) => {
+  const intl = useIntl();
+  const [filterName, setFilterName] = useState(renamingFilter.name);
+
+  const canSave = !!filterName && filterName !== renamingFilter.name;
+
+  return (
+    <Modal show className="rename-filter-dialog">
+      <Modal.Header>
+        <FormattedMessage id="actions.rename_filter" />
+      </Modal.Header>
+      <Modal.Body>
+        <Form.Group>
+          <Form.Label>
+            <FormattedMessage id="filter_name" />
+          </Form.Label>
+          <FormControl
+            className="bg-secondary text-white border-secondary"
+            placeholder={`${intl.formatMessage({ id: "filter_name" })}…`}
+            value={filterName}
+            onChange={(e) => setFilterName(e.target.value)}
+            onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => {
+              if (e.key === "Enter" && canSave) {
+                onClose(filterName);
+                e.preventDefault();
+              }
+            }}
+          />
+        </Form.Group>
+      </Modal.Body>
+      <Modal.Footer>
+        <Button variant="secondary" onClick={() => onClose()}>
+          {intl.formatMessage({ id: "actions.cancel" })}
+        </Button>
+        <Button
+          variant="primary"
+          disabled={!canSave}
+          onClick={() => onClose(filterName)}
+        >
+          {intl.formatMessage({ id: "actions.save" })}
+        </Button>
+      </Modal.Footer>
+    </Modal>
+  );
+};
+
 const DeleteAlert: React.FC<{
   deletingFilter: SavedFilterDataFragment | undefined;
   onClose: (confirm?: boolean) => void;
@@ -241,6 +295,65 @@ const OverwriteAlert: React.FC<{
   );
 };
 
+// the operations available for a single saved filter. The menu is portalled to
+// the document body so that it is not clipped by the scrolling filter list.
+const SavedFilterOperations: React.FC<{
+  id: string;
+  onOverwrite: () => void;
+  onRename: () => void;
+  onSetDefault?: () => void;
+  onDelete: () => void;
+}> = ({ id, onOverwrite, onRename, onSetDefault, onDelete }) => {
+  const intl = useIntl();
+
+  const menuPortalTarget =
+    typeof document !== "undefined" ? document.body : undefined;
+
+  const menu = (
+    <Dropdown.Menu className="bg-secondary text-white saved-filter-operations-menu">
+      <OperationDropdownItem
+        text={intl.formatMessage({ id: "actions.overwrite" })}
+        onClick={onOverwrite}
+      />
+      <OperationDropdownItem
+        text={intl.formatMessage({ id: "actions.rename" })}
+        onClick={onRename}
+      />
+      {onSetDefault && (
+        <OperationDropdownItem
+          text={intl.formatMessage({ id: "actions.set_as_default" })}
+          onClick={onSetDefault}
+        />
+      )}
+      <OperationDropdownItem
+        className="delete-button"
+        text={intl.formatMessage({ id: "actions.delete" })}
+        onClick={onDelete}
+      />
+    </Dropdown.Menu>
+  );
+
+  return (
+    <Dropdown
+      as={ButtonGroup}
+      className="saved-filter-operations"
+      // don't load the filter when interacting with its operations
+      onClick={(e: React.MouseEvent) => e.stopPropagation()}
+    >
+      <Dropdown.Toggle
+        variant="secondary"
+        id={`saved-filter-operations-${id}`}
+        className="minimal"
+        size="sm"
+        title={intl.formatMessage({ id: "operations" })}
+      >
+        <Icon icon={faEllipsisV} />
+      </Dropdown.Toggle>
+      {menuPortalTarget ? createPortal(menu, menuPortalTarget) : menu}
+    </Dropdown>
+  );
+};
+
 interface ISavedFilterListProps {
   filter: ListFilterModel;
   onSetFilter: (f: ListFilterModel) => void;
@@ -260,6 +373,93 @@ export const notifySavedFilterLoaded = PatchFunction(
   (event: ISavedFilterLoaded) => event
 );
 
+// renaming and setting a default operate on an existing saved filter rather
+// than on the currently applied filter, so these are shared between the
+// toolbar and sidebar saved filter lists
+function useSavedFilterOperations(props: {
+  filter: ListFilterModel;
+  view?: View;
+  setSaving: (saving: boolean) => void;
+  refetch: () => void;
+}) {
+  const { filter, view, setSaving, refetch } = props;
+
+  const Toast = useToast();
+  const intl = useIntl();
+
+  const saveFilter = useSaveFilter();
+  const [saveUISetting] = useConfigureUISetting();
+
+  // saving a filter replaces all of its fields, so the filter model must be
+  // built from the saved filter itself. An empty filter is used as the base so
+  // that nothing is inherited from the currently applied filter.
+  function filterFromSaved(f: SavedFilterDataFragment) {
+    const ret = filter.empty();
+    ret.configureFromSavedFilter(f);
+    return ret;
+  }
+
+  async function renameSavedFilter(f: SavedFilterDataFragment, name: string) {
+    try {
+      setSaving(true);
+
+      await saveFilter(filterFromSaved(f), name, f.id);
+
+      Toast.success(
+        intl.formatMessage(
+          {
+            id: "toast.saved_entity",
+          },
+          {
+            entity: intl.formatMessage({ id: "filter" }).toLocaleLowerCase(),
+          }
+        )
+      );
+      refetch();
+    } catch (err) {
+      Toast.error(err);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function setSavedFilterAsDefault(f: SavedFilterDataFragment) {
+    if (!view) {
+      return;
+    }
+
+    const filterCopy = filterFromSaved(f);
+
+    try {
+      setSaving(true);
+
+      await saveUISetting({
+        variables: {
+          key: `defaultFilters.${view.toString()}`,
+          value: {
+            mode: filter.mode,
+            find_filter: filterCopy.makeFindFilter(),
+            object_filter: filterCopy.makeSavedFilter(),
+            ui_options: filterCopy.makeSavedUIOptions(),
+          },
+        },
+      });
+
+      Toast.success(
+        intl.formatMessage({
+          id: "toast.default_filter_set",
+        })
+      );
+    } catch (err) {
+      Toast.error(err);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return { renameSavedFilter, setSavedFilterAsDefault };
+}
+
 export const SavedFilterList: React.FC<ISavedFilterListProps> = ({
   filter,
   onSetFilter,
@@ -278,10 +478,18 @@ export const SavedFilterList: React.FC<ISavedFilterListProps> = ({
   const [overwritingFilter, setOverwritingFilter] = useState<
     SavedFilterDataFragment | undefined
   >();
+  const [renamingFilter, setRenamingFilter] = useState<
+    SavedFilterDataFragment | undefined
+  >();
+  const [defaultingFilter, setDefaultingFilter] = useState<
+    SavedFilterDataFragment | undefined
+  >();
 
   const saveFilter = useSaveFilter();
   const [destroyFilter] = useSavedFilterDestroy();
-  const [saveUISetting] = useConfigureUISetting();
+
+  const { renameSavedFilter, setSavedFilterAsDefault } =
+    useSavedFilterOperations({ filter, view, setSaving, refetch });
 
   const savedFilters = data?.findSavedFilters ?? [];
 
@@ -345,40 +553,6 @@ export const SavedFilterList: React.FC<ISavedFilterListProps> = ({
     }
   }
 
-  async function onSetDefaultFilter() {
-    if (!view) {
-      return;
-    }
-
-    const filterCopy = filter.clone();
-
-    try {
-      setSaving(true);
-
-      await saveUISetting({
-        variables: {
-          key: `defaultFilters.${view.toString()}`,
-          value: {
-            mode: filter.mode,
-            find_filter: filterCopy.makeFindFilter(),
-            object_filter: filterCopy.makeSavedFilter(),
-            ui_options: filterCopy.makeSavedUIOptions(),
-          },
-        },
-      });
-
-      Toast.success(
-        intl.formatMessage({
-          id: "toast.default_filter_set",
-        })
-      );
-    } catch (err) {
-      Toast.error(err);
-    } finally {
-      setSaving(false);
-    }
-  }
-
   function filterClicked(f: SavedFilterDataFragment) {
     const newFilter = filter.clone();
 
@@ -407,32 +581,13 @@ export const SavedFilterList: React.FC<ISavedFilterListProps> = ({
         <Dropdown.Item onClick={() => filterClicked(item)} title={item.name}>
           <span>{item.name}</span>
         </Dropdown.Item>
-        <ButtonGroup>
-          <Button
-            className="save-button"
-            variant="secondary"
-            size="sm"
-            title={intl.formatMessage({ id: "actions.overwrite" })}
-            onClick={(e) => {
-              setOverwritingFilter(item);
-              e.stopPropagation();
-            }}
-          >
-            <Icon icon={faSave} />
-          </Button>
-          <Button
-            className="delete-button"
-            variant="secondary"
-            size="sm"
-            title={intl.formatMessage({ id: "actions.delete" })}
-            onClick={(e) => {
-              setDeletingFilter(item);
-              e.stopPropagation();
-            }}
-          >
-            <Icon icon={faTimes} />
-          </Button>
-        </ButtonGroup>
+        <SavedFilterOperations
+          id={item.id}
+          onOverwrite={() => setOverwritingFilter(item)}
+          onRename={() => setRenamingFilter(item)}
+          onSetDefault={view ? () => setDefaultingFilter(item) : undefined}
+          onDelete={() => setDeletingFilter(item)}
+        />
       </div>
     );
   };
@@ -463,25 +618,6 @@ export const SavedFilterList: React.FC<ISavedFilterListProps> = ({
     );
   }
 
-  function maybeRenderSetDefaultButton() {
-    if (view) {
-      return (
-        <div className="mt-1">
-          <Dropdown.Item
-            as={Button}
-            title={intl.formatMessage({ id: "actions.set_as_default" })}
-            className="set-as-default-button"
-            variant="secondary"
-            size="sm"
-            onClick={() => onSetDefaultFilter()}
-          >
-            {intl.formatMessage({ id: "actions.set_as_default" })}
-          </Dropdown.Item>
-        </div>
-      );
-    }
-  }
-
   return (
     <>
       <DeleteAlert
@@ -501,6 +637,27 @@ export const SavedFilterList: React.FC<ISavedFilterListProps> = ({
           }
           setOverwritingFilter(undefined);
         }}
+      />
+      {renamingFilter && (
+        <RenameFilterDialog
+          renamingFilter={renamingFilter}
+          onClose={(name) => {
+            if (name) {
+              renameSavedFilter(renamingFilter, name);
+            }
+            setRenamingFilter(undefined);
+          }}
+        />
+      )}
+      <AlertModal
+        show={!!defaultingFilter}
+        text={<FormattedMessage id="dialogs.set_default_filter_confirm" />}
+        confirmVariant="primary"
+        onConfirm={() => {
+          setSavedFilterAsDefault(defaultingFilter!);
+          setDefaultingFilter(undefined);
+        }}
+        onCancel={() => setDefaultingFilter(undefined)}
       />
       <InputGroup>
         <FormControl
@@ -533,7 +690,6 @@ export const SavedFilterList: React.FC<ISavedFilterListProps> = ({
         </InputGroup.Append>
       </InputGroup>
       {renderSavedFilters()}
-      {maybeRenderSetDefaultButton()}
     </>
   );
 };
@@ -541,6 +697,9 @@ export const SavedFilterList: React.FC<ISavedFilterListProps> = ({
 interface ISavedFilterItem {
   item: SavedFilterDataFragment;
   onClick: () => void;
+  onOverwrite: () => void;
+  onRename: () => void;
+  onSetDefault?: () => void;
   onDelete: () => void;
   selected?: boolean;
 }
@@ -548,11 +707,12 @@ interface ISavedFilterItem {
 const SavedFilterItem: React.FC<ISavedFilterItem> = ({
   item,
   onClick,
+  onOverwrite,
+  onRename,
+  onSetDefault,
   onDelete,
   selected = false,
 }) => {
-  const intl = useIntl();
-
   return (
     <li className="saved-filter-item">
       <a onClick={onClick}>
@@ -563,18 +723,13 @@ const SavedFilterItem: React.FC<ISavedFilterItem> = ({
           />
         </div>
         <div>
-          <Button
-            className="delete-button"
-            variant="minimal"
-            size="sm"
-            title={intl.formatMessage({ id: "actions.delete" })}
-            onClick={(e) => {
-              onDelete();
-              e.stopPropagation();
-            }}
-          >
-            <Icon fixedWidth icon={faTimes} />
-          </Button>
+          <SavedFilterOperations
+            id={item.id}
+            onOverwrite={onOverwrite}
+            onRename={onRename}
+            onSetDefault={onSetDefault}
+            onDelete={onDelete}
+          />
         </div>
       </a>
     </li>
@@ -587,6 +742,9 @@ const SavedFilters: React.FC<{
   saving?: boolean;
   savedFilters: SavedFilterDataFragment[];
   onFilterClicked: (f: SavedFilterDataFragment) => void;
+  onOverwriteClicked: (f: SavedFilterDataFragment) => void;
+  onRenameClicked: (f: SavedFilterDataFragment) => void;
+  onSetDefaultClicked?: (f: SavedFilterDataFragment) => void;
   onDeleteClicked: (f: SavedFilterDataFragment) => void;
   currentFilterID?: string;
 }> = ({
@@ -595,6 +753,9 @@ const SavedFilters: React.FC<{
   saving,
   savedFilters,
   onFilterClicked,
+  onOverwriteClicked,
+  onRenameClicked,
+  onSetDefaultClicked,
   onDeleteClicked,
   currentFilterID,
 }) => {
@@ -615,6 +776,11 @@ const SavedFilters: React.FC<{
           key={f.name}
           item={f}
           onClick={() => onFilterClicked(f)}
+          onOverwrite={() => onOverwriteClicked(f)}
+          onRename={() => onRenameClicked(f)}
+          onSetDefault={
+            onSetDefaultClicked ? () => onSetDefaultClicked(f) : undefined
+          }
           onDelete={() => onDeleteClicked(f)}
           selected={currentFilterID === f.id}
         />
@@ -643,12 +809,24 @@ export const SidebarSavedFilterList: React.FC<ISavedFilterListProps> = ({
   const [deletingFilter, setDeletingFilter] = useState<
     SavedFilterDataFragment | undefined
   >();
+  const [overwritingFilter, setOverwritingFilter] = useState<
+    SavedFilterDataFragment | undefined
+  >();
+  const [renamingFilter, setRenamingFilter] = useState<
+    SavedFilterDataFragment | undefined
+  >();
+  const [defaultingFilter, setDefaultingFilter] = useState<
+    SavedFilterDataFragment | undefined
+  >();
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   const [settingDefault, setSettingDefault] = useState(false);
 
   const saveFilter = useSaveFilter();
   const [destroyFilter] = useSavedFilterDestroy();
   const [saveUISetting] = useConfigureUISetting();
+
+  const { renameSavedFilter, setSavedFilterAsDefault } =
+    useSavedFilterOperations({ filter, view, setSaving, refetch });
 
   const filteredFilters = useMemo(() => {
     const savedFilters = data?.findSavedFilters ?? [];
@@ -800,6 +978,36 @@ export const SidebarSavedFilterList: React.FC<ISavedFilterListProps> = ({
           setDeletingFilter(undefined);
         }}
       />
+      <OverwriteAlert
+        overwritingFilter={overwritingFilter}
+        onClose={(confirm) => {
+          if (confirm) {
+            onSaveFilter(overwritingFilter!.name, overwritingFilter!.id);
+          }
+          setOverwritingFilter(undefined);
+        }}
+      />
+      {renamingFilter && (
+        <RenameFilterDialog
+          renamingFilter={renamingFilter}
+          onClose={(name) => {
+            if (name) {
+              renameSavedFilter(renamingFilter, name);
+            }
+            setRenamingFilter(undefined);
+          }}
+        />
+      )}
+      <AlertModal
+        show={!!defaultingFilter}
+        text={<FormattedMessage id="dialogs.set_default_filter_confirm" />}
+        confirmVariant="primary"
+        onConfirm={() => {
+          setSavedFilterAsDefault(defaultingFilter!);
+          setDefaultingFilter(undefined);
+        }}
+        onCancel={() => setDefaultingFilter(undefined)}
+      />
       {showSaveDialog && (
         <SaveFilterDialog
           mode={filter.mode}
@@ -851,6 +1059,9 @@ export const SidebarSavedFilterList: React.FC<ISavedFilterListProps> = ({
         saving={saving}
         savedFilters={filteredFilters}
         onFilterClicked={filterClicked}
+        onOverwriteClicked={setOverwritingFilter}
+        onRenameClicked={setRenamingFilter}
+        onSetDefaultClicked={view ? setDefaultingFilter : undefined}
         onDeleteClicked={setDeletingFilter}
         currentFilterID={currentSavedFilter?.id}
       />

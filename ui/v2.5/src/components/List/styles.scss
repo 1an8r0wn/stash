@@ -156,13 +156,6 @@ input[type="range"].zoom-slider {
     flex-direction: column;
   }
 
-  .set-as-default-button {
-    float: right;
-    margin-right: 0.5rem;
-    padding: 0.25rem 0.5rem;
-    width: auto;
-  }
-
   .LoadingIndicator {
     height: auto;
     text-align: center;
@@ -207,10 +200,14 @@ input[type="range"].zoom-slider {
         border-radius: 0;
       }
     }
+  }
+}
 
-    .delete-button {
-      color: $danger;
-    }
+// the operations menu is portalled to the document body, so it cannot be
+// nested inside the saved filter list
+.saved-filter-operations-menu {
+  .delete-button {
+    color: $danger;
   }
 }
 
@@ -267,10 +264,6 @@ input[type="range"].zoom-slider {
       .fa-icon {
         flex-shrink: 0;
       }
-    }
-
-    .delete-button {
-      color: $danger;
     }
   }
 
